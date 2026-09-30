@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>LMS Upload Converter</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+:root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);--bg:#f6f7f4;--fg:#1c2421;--mut:#5d6b65;--ac:#0f6b57;--acfg:#fff;--bd:#cfd6d1;--card:#fff;--warn:#8a5a00}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#141a17;--fg:#e6ebe8;--mut:#9aa8a1;--ac:#4cc3a4;--acfg:#08211a;--bd:#33403a;--card:#1b2320;--warn:#e0b04a}}
+:root[data-theme="dark"]{--bg:#141a17;--fg:#e6ebe8;--mut:#9aa8a1;--ac:#4cc3a4;--acfg:#08211a;--bd:#33403a;--card:#1b2320;--warn:#e0b04a}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 "Source Sans 3",system-ui,sans-serif}
+main{max-width:760px;margin:0 auto;padding:24px 16px 48px}
+h1{font-size:1.7rem;margin:0 0 4px}p.s{color:var(--mut);margin:0 0 20px}
+section{background:var(--card);border:1px solid var(--bd);border-radius:8px;padding:16px;margin-bottom:16px}
+h2{font-size:1.05rem;margin:0 0 8px}
+textarea,input[type=file]{width:100%;box-sizing:border-box;font:inherit;color:inherit;background:transparent;border:1px solid var(--bd);border-radius:6px;padding:8px}
+textarea{min-height:170px}
+button,a.dl{display:inline-block;font:inherit;background:var(--ac);color:var(--acfg);border:0;border-radius:6px;padding:9px 16px;cursor:pointer;text-decoration:none;margin:4px 6px 4px 0}
+button:disabled{opacity:.5;cursor:default}
+button:focus-visible,a.dl:focus-visible,textarea:focus-visible,input:focus-visible{outline:3px solid var(--ac);outline-offset:2px}
+table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:6px 8px;border-bottom:1px solid var(--bd)}
+.w{color:var(--warn);font-size:.92rem;margin:2px 0}.h{display:none}
+</style></head><body><main>
+<h1>LMS upload converter</h1>
+<p class="s">Upload your question Excel files, add chapter names, download upload-ready zips. Everything runs in your browser; no file leaves your computer.</p>
+<section><h2>1. Question Excel files</h2><input type="file" id="f" accept=".xlsx" multiple>
+<p class="s" id="fi" style="margin:8px 0 0"></p></section>
+<section><h2>2. ISBN</h2>
+<p class="s" style="margin-bottom:8px">13-digit number, digits only. It goes into the ISBN column of every file.</p>
+<input type="text" id="isbn" inputmode="numeric" maxlength="13" placeholder="9781234567890" autocomplete="off" style="width:100%;box-sizing:border-box;font:inherit;color:inherit;background:transparent;border:1px solid var(--bd);border-radius:6px;padding:8px">
+<p class="w" id="ie" style="display:none;margin:6px 0 0"></p></section>
+<section><h2>3. Chapter names</h2>
+<p class="s" style="margin-bottom:8px">One per line, exactly as you want it in the chapter column, e.g. <b>1.My Family</b>. Sheet names like "Ch 3" or "Ch-3" are matched by number.</p>
+<textarea id="ch" placeholder="1.My Family&#10;2.Our House: Our Shelter"></textarea></section>
+<section><button id="go" disabled>Convert</button><div id="out"></div></section>
+<section class="h" id="wr"><h2>Check these</h2><div id="wl"></div></section>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const clean=v=>v==null?'':String(v).replace(/\u00a0/g,' ').replace(/_x[0-9A-Fa-f]{4}_/g,'').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\t]/g,' ').replace(/\s*[\r\n]+\s*/g,' ').replace(/ {2,}/g,' ').trim();
+const TM={fib:'FIB',tf:'TF','true/false':'TF',mcq:'MCQ',mtf:'MTF','mtf-statement':'MTFS',la:'LA',longanswer:'LA',sa:'SA',shortanswer:'SA',veryshortanswer:'VSA',vsa:'VSA',passage:'PASSAGE',activitybased:'SA',givereason:'SA',casestudy:'LA'};
+const SUBJ=new Set(['LA','SA','VSA']),LINES={VSA:1,SA:3,LA:5},CAT={VSA:'SHORT_ANSWER',SA:'SHORT_ANSWER',LA:'LONG_ANSWER'};
+const BL={remember:'Remember',remembering:'Remember',understand:'Understand',understanding:'Understand',apply:'Apply',applying:'Apply',analyse:'Analyze',analyze:'Analyze',analysing:'Analyze',evaluate:'Evaluate',create:'Create'};
+const DF={easy:'EASY',medium:'MEDIUM',difficult:'HARD',hard:'HARD'};
+const SR=k=>({coursebook:'Coursebook',additional:'Additional','practice book':'Workbook',practicebook:'Workbook'})[clean(k).toLowerCase()]||'';
+const bl=x=>BL[clean(x).toLowerCase()]||'',df=x=>DF[clean(x).toLowerCase()]||'';
+const num=v=>{v=clean(v);if(!v)return'';const f=Number(v);return isNaN(f)?v:String(f)};
+const L2I=c=>{c=clean(c);return/^\d+$/.test(c)?+c:/^[a-zA-Z]$/.test(c)?c.toLowerCase().charCodeAt(0)-96:null};
+const ROMAN=['I','II','III','IV','V','VI','VII','VIII','IX','X'];
+let books=[],warns=[],ISBN='';
+$('f').onchange=async e=>{books=[];for(const f of e.target.files)books.push({name:f.name,wb:XLSX.read(await f.arrayBuffer(),{type:'array'})});
+ const chs=new Set();books.forEach(b=>b.wb.SheetNames.forEach(n=>{const m=n.match(/\d+/);if(m)chs.add(+m[0])}));
+ const list=[...chs].sort((a,b)=>a-b);$('fi').textContent=books.length+' file(s), chapters found: '+(list.join(', ')||'none');
+ if(!$('ch').value.trim())$('ch').value=list.map(n=>n+'.').join('\n');$('go').disabled=!list.length};
+function chapNames(){const m={};$('ch').value.split('\n').forEach(l=>{const x=l.match(/^\s*(\d+)\s*[.\-:)]*\s*(.*)$/);if(x)m[+x[1]]=x[2].trim()?x[1]+'.'+x[2].trim():''});return m}
+function parse(){const out=[];
+ for(const b of books)for(const ws of b.wb.SheetNames.map(n=>b.wb.Sheets[n]).entries()){const [si,sh]=ws,title=b.wb.SheetNames[si],cm=title.match(/\d+/);if(!cm)continue;const ch=+cm[0];
+  const rows=XLSX.utils.sheet_to_json(sh,{header:1,defval:''});if(rows.length<2)continue;
+  const H={};rows[0].forEach((c,i)=>{const k=clean(c).toLowerCase().replace(/['\s]/g,'');if(k)H[k]=i});
+  const oc=Object.keys(H).filter(k=>/^option\d+$/.test(k)).sort((a,b)=>H[a]-H[b]).map(k=>H[k]);
+  let cur=null,instr='',it=null,mtf=null,pas=null,ps=false;
+  for(let r=1;r<rows.length;r++){const row=rows[r],loc=title+' r'+(r+1),g=k=>H[k]==null?'':row[H[k]];
+   if(!row.some(c=>clean(c))){if(it!==null){instr='';it=null}if(ps&&pas&&pas.subs.length){pas=null;ps=false}continue}
+   let t=clean(g('questiontype')).toLowerCase().replace(/\s/g,'');if(t){if(!TM[t]){warns.push(loc+': unknown question type "'+t+'" skipped');continue}t=TM[t]}
+   const raw=String(g('questiontext')||''),text=clean(raw),opts=oc.map(i=>clean(row[i]));
+   const corr=clean(g('correctoptions'))||clean(g('correctoption')),ans=clean(g('answer')),marks=num(g('marks')),diff=clean(g('difficultylevel'))||clean(g('difficulty')),tag=clean(g('questiontag')),bloom=clean(g('bloomstaxonomy')),sid=clean(g('id'))||clean(g('s.no.'));
+   const nomeat=!marks&&!ans&&!corr&&!opts.some(Boolean);
+   if(!text&&nomeat)continue;
+   if((!sid&&!t&&text&&nomeat)||(SUBJ.has(t)&&text&&nomeat)){
+    if(text.length>150||raw.includes('##')){const lines=raw.split('\n').map(l=>l.replace(/##\w+##/g,'').trim()).filter(Boolean);let ins='',body=lines.join(' ');
+     if(/^(Read|Look)\b/.test(lines[0])){let k=0,acc=[];for(k=0;k<lines.length;k++){acc.push(lines[k]);if(/[.:]$/.test(lines[k]))break}ins=acc.join(' ');body=lines.slice(k+1).join(' ')}
+     pas={kind:'R',ch,para:clean(body)||clean(ins),instr:clean(ins),ph:/##\w+##/.test(raw),loc,subs:[]};out.push(pas);ps=true;mtf=null;cur=null;instr='';it=null}
+    else{instr=text;it=null;if(SUBJ.has(t)){cur=t;it=t;mtf=null}}continue}
+   if(t==='MTF'){mtf={kind:'M',ch,loc,text,opts:opts.filter(Boolean).map(o=>o.replace(/^[a-j]\.\s*/,'')),stmts:[],instr,diff,tag,bloom};out.push(mtf);cur='MTF';continue}
+   if(t==='MTFS'||(!t&&cur==='MTF')){if(mtf){mtf.stmts.push({text,corr,marks});if(!mtf.diff)mtf.diff=diff;if(!mtf.tag)mtf.tag=tag;if(!mtf.bloom)mtf.bloom=bloom}continue}
+   if(t==='PASSAGE'){pas={kind:'R',ch,para:text,instr,ph:false,loc,subs:[]};out.push(pas);ps=false;cur='PASSAGE';continue}
+   if(!t&&cur==='PASSAGE'){pas.subs.push({q:text,ans,opts:opts.filter(Boolean),marks,diff,bloom,tag,st:'SA'});continue}
+   if(t){if(t!==cur&&instr&&it!==null&&t!==it){instr='';it=null}cur=t}
+   if(ps&&pas&&SUBJ.has(cur)){pas.subs.push({q:text,ans,opts:opts.filter(Boolean),marks,diff,bloom,tag,st:cur});continue}
+   if(instr&&it===null)it=cur;else if(instr&&cur!==it){instr='';it=null}
+   out.push({kind:'Q',type:cur,loc,ch,text,opts,corr,ans,marks,diff,bloom,tag,instr})}}
+ return out}
+const csv=rows=>rows.map(r=>r.map(c=>{c=c==null?'':String(c);return/[",\n]/.test(c)?'"'+c.replace(/"/g,'""')+'"':c}).join(',')).join('\n')+'\n';
+function build(items,CH){
+ const cn=n=>CH[n]||('Chapter '+n),tail=(o,m,av)=>[ISBN,cn(o.ch),o.instr||'',m,df(o.diff),av,SR(o.tag),bl(o.bloom)];
+ const TQ=['isbn','chapter','instruction','default_marks','difficulty_level','question_availability','question_source','blooms_taxonomy'];
+ const sub=(q,opts)=>opts.length?q+' ('+opts.join(', ')+')':q;
+ const R={mcq:[],tf:[],fib:[],mt:[],sj:[],rub:[]},cnt={};
+ const mq=items.filter(o=>o.kind==='Q'&&o.type==='MCQ'),mo=Math.max(4,...mq.map(o=>o.opts.filter(Boolean).length));
+ let h=['question','question_media'];for(let n=1;n<=mo;n++)h.push('option_'+n,'option_'+n+'_media','correct_option_'+n);R.mcq=[h.concat(TQ)];
+ for(const o of mq){const op=o.opts.filter(Boolean);let i=L2I(o.corr);const hit=op.findIndex(x=>o.ans&&x.toLowerCase()===o.ans.toLowerCase());
+  if(hit>=0&&hit+1!==i){warns.push(o.loc+': MCQ marked option '+i+' but Answer text matches option '+(hit+1)+'; used the Answer text');i=hit+1}
+  if(!i||i>op.length){warns.push(o.loc+': MCQ correct option invalid, skipped');continue}
+  const r=[o.text,''];for(let n=1;n<=mo;n++)r.push(op[n-1]||'','',n<=op.length?(n===i?'true':'false'):'');R.mcq.push(r.concat(tail(o,o.marks||'1','ONLINE')))}
+ R.tf=[['question','question_media','answer'].concat(TQ)];
+ for(const o of items.filter(o=>o.kind==='Q'&&o.type==='TF')){const k=(o.corr||o.ans).toLowerCase();const v=k==='1'||k==='true'?'TRUE':k==='2'||k==='false'?'FALSE':'';
+  if(!v){warns.push(o.loc+': True/False key not 1/2, skipped');continue}
+  if(!o.marks)warns.push(o.loc+': True/False had no marks, set to 1');R.tf.push([o.text.replace(/^\d+\.\s*/,''),'',v].concat(tail(o,o.marks||'1','ONLINE')))}
+ const fq=items.filter(o=>o.kind==='Q'&&o.type==='FIB'),mb=Math.max(1,...fq.map(o=>(o.text.match(/#BLANK#/g)||[]).length));
+ h=['question','question_media'];for(let n=1;n<=mb;n++)h.push('option_'+n,'option_'+n+'_blank_space_length');R.fib=[h.concat(['hints'],TQ)];
+ for(const o of fq){const nb=(o.text.match(/#BLANK#/g)||[]).length,p=nb<=1?[o.ans]:o.ans.split(',').map(s=>s.trim());
+  if(!nb||p.length!==nb||p.some(x=>!x)){warns.push(o.loc+': fill-in-blank needs '+nb+' answer(s) matching #BLANK#, skipped');continue}
+  let c=0;const r=[o.text.replace(/#BLANK#/g,()=>'{{opt'+(++c)+'}}'),''];for(let n=0;n<mb;n++)r.push(p[n]||'',p[n]?p[n].length:'');
+  R.fib.push(r.concat([''],tail(o,o.marks||'1','ONLINE')))}
+ const ms=items.filter(o=>o.kind==='M'),mx=Math.max(4,...ms.map(o=>o.opts.length));h=['question','question_media'];
+ for(let n=1;n<=mx;n++)h.push('columnA_'+n,'columnA_'+n+'_media',(n===1?'columnA_1_label':'ColumnA_'+n+'_label'),'columnA_'+n+'_correctMatch');
+ for(let n=1;n<=mx;n++)h.push('columnB_'+n,'columnB_'+n+'_media',(n===1?'columnB_1_label':'ColumnB_'+n+'_label'));
+ R.mt=[h.concat(['columnA_label','columnB_label','option_table','option_table_media'],TQ)];
+ for(const o of ms){const n=o.opts.length,ix=o.stmts.map(s=>L2I(s.corr));
+  if(o.stmts.length!==n||[...ix].sort((a,b)=>a-b).join()!==Array.from({length:n},(_,i)=>i+1).join()){warns.push(o.loc+': matching set is not a clean 1-to-1 match, skipped');continue}
+  const r=[o.text,''];for(let k=0;k<mx;k++)r.push(...(k<n?[o.stmts[k].text,'',String(k+1),String(ix[k])]:['','','','']));
+  for(let k=0;k<mx;k++)r.push(...(k<n?[o.opts[k],'',ROMAN[k]]:['','','']));
+  R.mt.push(r.concat(['Column A','Column B','',''],tail(o,String(o.stmts.reduce((a,s)=>a+(+s.marks||1),0)),'ONLINE')))}
+ R.sj=[['question','question_media','answer','answer_media','no_of_line','sub_category'].concat(TQ)];
+ for(const o of items.filter(o=>o.kind==='Q'&&SUBJ.has(o.type))){if(!o.ans)warns.push(o.loc+': short/long question has no answer (kept, answer blank)');
+  R.sj.push([sub(o.text,o.opts.filter(Boolean)),'',o.ans,'',LINES[o.type],CAT[o.type]].concat(tail(o,o.marks||'1','OFFLINE')))}
+ const W=23,pad=r=>r.concat(Array(W-r.length).fill(''));
+ for(const p of items.filter(o=>o.kind==='R')){if(!p.subs.length)continue;if(p.ph){warns.push(p.loc+': passage has a picture placeholder (##...##) but no picture; check it and add the picture in the LMS');}
+  const f=p.subs[0];R.rub.push(pad(['##RUBRIC']),pad(['paragraph','paragraph_media','sub_category','isbn','chapter','instruction','difficulty_level','question_availability','question_source','blooms_taxonomy']),
+   pad([p.para,'','CASE_STUDY',ISBN,cn(p.ch),p.instr,df(f.diff),'ONLINE',SR(f.tag),bl(f.bloom)]),pad([]),pad(['##SUBJECTIVE']),pad(['question','question_media','answer','answer_media','no_of_line','sub_category','default_marks','difficulty_level','blooms_taxonomy']));
+  for(const s of p.subs)R.rub.push(pad([sub(s.q,s.opts),'',s.ans,'',LINES[s.st],CAT[s.st],s.marks||'1',df(s.diff),bl(s.bloom)]));R.rub.push(pad([]))}
+ return R}
+const NAMES={mcq:['1_MCQ','mcq'],tf:['2_True_False','true_false'],fib:['3_Fill_in_the_Blank','fib'],mt:['4_Matching','matching'],sj:['5_Subjective_Short_Long','subjective'],rub:['6_Rubric_Passage_Case_Study','rubric']};
+$('go').onclick=async()=>{warns=[];const iv=$('isbn').value.trim(),ie=$('ie');
+ if(!/^\d{13}$/.test(iv)){ie.textContent='Enter the ISBN as exactly 13 digits, numbers only ('+iv.replace(/\D/g,'').length+' digits entered).';ie.style.display='block';$('isbn').focus();return}
+ ie.style.display='none';ISBN=iv;const CH=chapNames();const items=parse();const R=build(items,CH);
+ const used=[...new Set(items.map(o=>o.ch))].filter(n=>!CH[n]);if(used.length)warns.push('No chapter name given for chapter(s) '+used.sort((a,b)=>a-b).join(', ')+'; "Chapter N" was used');
+ const out=$('out');out.innerHTML='<table><tr><th>Type</th><th>Rows</th><th></th></tr></table>';const tb=out.firstChild;const all=new JSZip();
+ for(const [k,[fn,folder]] of Object.entries(NAMES)){const rows=R[k],n=k==='rub'?rows.filter(r=>r[0]==='##RUBRIC').length:rows.length-1;if(n<=0)continue;
+  const z=new JSZip(),d=z.folder(folder);d.file(folder+'.csv',csv(rows));d.folder('media');all.file(fn+'.zip',await z.generateAsync({type:'uint8array'}));
+  const url=URL.createObjectURL(await z.generateAsync({type:'blob'}));const tr=tb.insertRow();tr.innerHTML='<td>'+fn.replace(/^\d_/,'').replace(/_/g,' ')+'</td><td>'+n+(k==='rub'?' block(s)':'')+'</td><td><a class="dl" download="'+fn+'.zip" href="'+url+'">Download</a></td>'}
+ const au=URL.createObjectURL(await all.generateAsync({type:'blob'}));out.insertAdjacentHTML('beforeend','<a class="dl" download="LMS_upload_zips.zip" href="'+au+'">Download all zips</a>');
+ $('wr').classList.toggle('h',!warns.length);$('wl').innerHTML=warns.map(w=>'<p class="w">'+w.replace(/</g,'&lt;')+'</p>').join('')};
+</script></body></html>
